@@ -107,9 +107,27 @@ void loadConfigFromEEPROM() {
   }
 }
 
+void clearEEPROMIfNeeded() {
+  uint8_t count = EEPROM.read(0);
+  if (count == 0) {
+    Serial.println("ℹ️ EEPROM ya vacía, nada que borrar.");
+    return;
+  }
+
+  for (int i = 0; i < EEPROM.length(); i++) EEPROM.write(i, 0xFF);
+  EEPROM.write(0, 0);
+  for (int i = 0; i < switchCount; i++) delete switches[i];
+  for (int i = 0; i < buttonCount; i++) delete buttons[i];
+  for (int i = 0; i < potCount; i++) delete pots[i];
+  for (int i = 0; i < outputCount; i++) delete outputs[i];
+  switchCount = buttonCount = potCount = outputCount = 0;
+  Serial.println("🧹 EEPROM borrada y memoria liberada.");
+}
+
+
 void savePinConfig(const String& tipo, int pin, const char* param, const char* v1, const char* v2) {
   const size_t structSize = sizeof(PinConfig);
-  const uint8_t maxEntriesBySize = (EEPROM_MAX_SIZE - 1) / structSize;  // -1 por el byte de cantidad
+  const uint8_t maxEntriesBySize = (EEPROM_MAX_SIZE - 1) / structSize;
 
   uint8_t count = EEPROM.read(0);
   if (count >= EEPROM_MAX_ENTRIES || count >= maxEntriesBySize) {
@@ -120,7 +138,7 @@ void savePinConfig(const String& tipo, int pin, const char* param, const char* v
   PinConfig cfg;
   cfg.pin = pin;
   strncpy(cfg.param, param, sizeof(cfg.param));
-  cfg.param[sizeof(cfg.param) - 1] = '\0'; // Seguridad
+  cfg.param[sizeof(cfg.param) - 1] = '\0';
   cfg.minOut = atof(v1);
   cfg.maxOut = atof(v2);
   cfg.minIn = 0;
@@ -135,18 +153,20 @@ void savePinConfig(const String& tipo, int pin, const char* param, const char* v
   else if (tipo == "POTENCIOMETRO" || tipo == "POT") cfg.type = 3;
   else return;
 
-  // Si ya existe con mismo pin y tipo → actualizar
   for (int i = 0; i < count; i++) {
     PinConfig existing;
     EEPROM.get(1 + i * structSize, existing);
     if (existing.pin == cfg.pin && existing.type == cfg.type) {
-      EEPROM.put(1 + i * structSize, cfg);
-      Serial.println("ACTUALIZADO PIN " + String(cfg.pin));
+      if (memcmp(&existing, &cfg, sizeof(PinConfig)) != 0) {
+        EEPROM.put(1 + i * structSize, cfg);
+        Serial.println("ACTUALIZADO PIN " + String(cfg.pin));
+      } else {
+        Serial.println("SIN CAMBIOS: PIN " + String(cfg.pin));
+      }
       return;
     }
   }
 
-  // Nuevo registro
   EEPROM.put(1 + count * structSize, cfg);
   EEPROM.write(0, count + 1);
   Serial.println("AGREGADO PIN " + String(cfg.pin));
@@ -162,6 +182,8 @@ void updatePotParam(String cmd) {
     PinConfig cfg;
     EEPROM.get(1 + i * sizeof(PinConfig), cfg);
     if (cfg.pin == pin && cfg.type == 3) {
+      PinConfig original = cfg; // Copia original para comparar
+
       String f = String(field);
       if (f == "SCALE" && args >= 6) {
         cfg.minIn = atoi(a); cfg.maxIn = atoi(b);
@@ -179,13 +201,26 @@ void updatePotParam(String cmd) {
         Serial.println("ERROR: CFG inválido");
         return;
       }
-      EEPROM.put(1 + i * sizeof(PinConfig), cfg);
-      Serial.println("CFG ACTUALIZADO EN PIN " + String(pin));
+
+      if (memcmp(&cfg, &original, sizeof(PinConfig)) != 0) {
+        EEPROM.put(1 + i * sizeof(PinConfig), cfg);
+        Serial.println("CFG ACTUALIZADO EN PIN " + String(pin));
+      } else {
+        Serial.println("CFG SIN CAMBIOS EN PIN " + String(pin));
+      }
       return;
     }
   }
 
   Serial.println("ERROR: Pin no encontrado o no es POT");
+}
+
+void printFloatSmart(float value) {
+  if (value == (int)value) {
+    Serial.print((int)value);
+  } else {
+    Serial.print(value, 3);
+  }
 }
 
 void handleLine(const char* command, const char* value) {
@@ -212,21 +247,14 @@ void handleLine(const char* command, const char* value) {
     #else
       NVIC_SystemReset();
     #endif
-    return;
+      return;
   }
 
   if (cmd == "#CLEAR") {
-    for (int i = 0; i < EEPROM.length(); i++) EEPROM.write(i, 0xFF);
-    EEPROM.write(0, 0);
-    for (int i = 0; i < switchCount; i++) delete switches[i];
-    for (int i = 0; i < buttonCount; i++) delete buttons[i];
-    for (int i = 0; i < potCount; i++) delete pots[i];
-    for (int i = 0; i < outputCount; i++) delete outputs[i];
-    switchCount = buttonCount = potCount = outputCount = 0;
-    Serial.println("🧹 EEPROM borrada y memoria liberada.");
+    clearEEPROMIfNeeded();
     bloqueado = false;
     return;
-  }
+  }  
 
   if (cmd == "#DUMP") {
     uint8_t count = EEPROM.read(0);
@@ -234,27 +262,29 @@ void handleLine(const char* command, const char* value) {
     for (int i = 0; i < count; i++) {
       PinConfig cfg;
       EEPROM.get(1 + i * sizeof(PinConfig), cfg);
-  
+
       Serial.print("ADD ");
       Serial.print(cfg.type == 0 ? "SWITCH " :
-                   cfg.type == 1 ? "BUTTON " :
-                   cfg.type == 2 ? "OUTPUT " :
-                   "POT ");
+                  cfg.type == 1 ? "BUTTON " :
+                  cfg.type == 2 ? "OUTPUT " :
+                  "POT ");
       Serial.print(cfg.pin); Serial.print(" ");
       Serial.print(cfg.param); Serial.print(" ");
-      Serial.print(cfg.minOut, 3); Serial.print(" ");
-      Serial.println(cfg.maxOut, 3);
-  
+      printFloatSmart(cfg.minOut); Serial.print(" ");
+      printFloatSmart(cfg.maxOut); Serial.println();
+
       if (cfg.type == 3) {
         Serial.print("CFG "); Serial.print(cfg.pin);
         Serial.print(" SCALE "); Serial.print(cfg.minIn);
         Serial.print(" "); Serial.print(cfg.maxIn);
-        Serial.print(" "); Serial.print(cfg.minOut, 3);
-        Serial.print(" "); Serial.println(cfg.maxOut, 3);
-  
+        Serial.print(" "); printFloatSmart(cfg.minOut);
+        Serial.print(" "); printFloatSmart(cfg.maxOut);
+        Serial.println();
+
         Serial.print("CFG "); Serial.print(cfg.pin);
-        Serial.print(" SMOOTH "); Serial.println(cfg.suavizado, 3);
-  
+        Serial.print(" SMOOTH "); printFloatSmart(cfg.suavizado);
+        Serial.println();
+
         Serial.print("CFG "); Serial.print(cfg.pin);
         Serial.print(" MODE ");
         switch (cfg.modoEnvio) {
@@ -278,7 +308,6 @@ void handleLine(const char* command, const char* value) {
     bloqueado = false;
     return;
   }
-  
 
   if (modoConfig && cmd.startsWith("ADD")) {
     char tipo[20], pinStr[10], param[20], v1[10], v2[10];
@@ -324,10 +353,16 @@ void setup() {
   serialInterface.begin();
   loadConfigFromEEPROM();
 
-  for (int i = 0; i < switchCount; i++) { switches[i]->begin(); Serial.print("register("); Serial.print(switchParams[i]); Serial.println(")"); }
-  for (int i = 0; i < buttonCount; i++) { buttons[i]->begin(); Serial.print("register("); Serial.print(buttonParams[i]); Serial.println(")"); }
-  for (int i = 0; i < outputCount; i++) { outputs[i]->begin(); Serial.print("register("); Serial.print(outputParams[i]); Serial.println(")"); }
-  for (int i = 0; i < potCount; i++) { Serial.print("register("); Serial.print(potParams[i]); Serial.println(")"); }
+  // Inicializar componentes
+  for (int i = 0; i < switchCount; i++) switches[i]->begin();
+  for (int i = 0; i < buttonCount; i++) buttons[i]->begin();
+  for (int i = 0; i < outputCount; i++) {
+    outputs[i]->begin();
+    Serial.print("register(");
+    Serial.print(outputParams[i]);
+    Serial.println(")");
+  }
+  for (int i = 0; i < potCount; i++) pots[i]->begin();
 
   Serial.println("Listo. v1.0");
 }
